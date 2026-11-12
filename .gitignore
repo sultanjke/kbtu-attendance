@@ -1,0 +1,11 @@
+venv/
+.env
+users.json
+*.pem
+*.key
+id_rsa
+id_ed25519
+__pycache__/
+*.pyc
+.idea/
+.vscode/

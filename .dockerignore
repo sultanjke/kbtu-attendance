@@ -1,0 +1,13 @@
+.git
+.github
+.gitignore
+.env
+.env.example
+users.json
+AGENTS.md
+README.md
+deploy.sh
+hello.html
+__pycache__/
+*.py[cod]
+venv/

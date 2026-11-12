@@ -1,0 +1,85 @@
+name: Verify and deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: azure-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile Python source
+        run: python -m py_compile main.py
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+      VM_USER: ${{ secrets.AZURE_VM_USER }}
+      SSH_PRIVATE_KEY: ${{ secrets.AZURE_VM_SSH_PRIVATE_KEY }}
+      SSH_KNOWN_HOSTS: ${{ secrets.AZURE_VM_KNOWN_HOSTS }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package tracked files
+        run: git archive --format=tar.gz --output="$RUNNER_TEMP/deployment.tar.gz" HEAD
+
+      - name: Configure SSH
+        run: |
+          test -n "$VM_HOST"
+          test -n "$VM_USER"
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$SSH_KNOWN_HOSTS"
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" | tr -d '\r' > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+
+      - name: Upload release
+        run: |
+          scp -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$RUNNER_TEMP/deployment.tar.gz" \
+            "$VM_USER@$VM_HOST:/tmp/kbtu-attendance-$GITHUB_SHA.tar.gz"
+
+      - name: Deploy release
+        run: |
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$VM_USER@$VM_HOST" sh -s -- "$GITHUB_SHA" <<'REMOTE_SCRIPT'
+          set -eu
+          archive="/tmp/kbtu-attendance-$1.tar.gz"
+          deploy_dir="$HOME/kbtu-attendance-v2"
+          trap 'rm -f "$archive"' EXIT
+
+          if [ ! -f "$deploy_dir/.env" ]; then
+              echo "Missing $deploy_dir/.env; configure the VM before deploying." >&2
+              exit 1
+          fi
+
+          mkdir -p "$deploy_dir"
+          tar -xzf "$archive" -C "$deploy_dir"
+          cd "$deploy_dir"
+          sh deploy.sh
+
+          container_id="$(docker compose ps -q autoscraper)"
+          test -n "$container_id"
+          test "$(docker inspect --format '{{.State.Running}}' "$container_id")" = "true"
+          REMOTE_SCRIPT
